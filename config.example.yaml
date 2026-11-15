@@ -1,0 +1,47 @@
+# MovieKaleidoscope 設定ファイルの例(UTF-8)
+# 相対パスは、この設定ファイルのあるフォルダが基準です。
+# CLI オプションは、ここに書いた値より優先されます。
+
+inputs:
+  - ./clips
+  - ./extra/one.mp4
+recursive: false
+extensions: [mp4, mov, mkv, avi, webm, m4v, mpg, mpeg, wmv, flv]   # フォルダ探索のみ
+output: ./out/result.mp4
+plan: null            # null なら <output>.plan.json
+duration: 60          # 秒 または "mm:ss"。省略時は音声の長さ
+seed: null            # null なら自動生成して記録
+overwrite: false
+
+video:
+  width: null         # null なら最初の入力に合わせる
+  height: null
+  fps: null           # 例: 30 / 29.97 / "30000/1001"
+  crf: 18
+  preset: medium
+
+audio:
+  file: null          # 例: ./bgm.wav (null なら音声なし)
+  start: 0.0
+  bpm: null           # null なら自動解析
+  beat_offset: null
+  bpm_range: [70, 180]
+
+cut:
+  mode: auto          # auto / fixed / random / beat
+  fixed: 2.0
+  random: {min: 1.0, max: 4.0}
+  beats: [4]          # beat モード。複数ならランダムに選ぶ
+
+effects:
+  enabled: all        # または名前のリスト。一覧は mkaleido --list-effects
+  exclude: []         # 使わないエフェクト。例: [reverse]
+  weights: {}         # 出現の重み(既定 1.0)。例: {speed: 2.0, flip: 0.5}
+  params: {}          # パラメータ範囲の上書き。例: {rgbshift: {amount: {min: 2, max: 20}}, reverse: {max_sec: 8}}
+
+runtime:
+  jobs: auto
+  work_dir: null
+  keep_temp: false
+  ffmpeg: null        # null なら 環境変数 FFMPEG_BIN → PATH の順に探す
+  ffprobe: null

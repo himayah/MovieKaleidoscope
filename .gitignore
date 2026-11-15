@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# Generated videos and their plans (may contain third-party footage and local paths)
+sample/
+*.mp4
+*.plan.json

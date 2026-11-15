@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moviekaleidoscope"
+version = "0.1.0"
+description = "Cut-and-paste psychedelic video generator (no generative AI)."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python-headless",
+    "PyYAML",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+mkaleido = "moviekaleidoscope.cli:main"
+
+[project.gui-scripts]
+mkaleido-gui = "moviekaleidoscope.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+markers = [
+    "integration: requires ffmpeg/ffprobe",
+]
