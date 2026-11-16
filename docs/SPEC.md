@@ -481,7 +481,7 @@ MovieKaleidoscope/
 | BPM | ユニットは不要(合成した信号を直接渡す)。実ファイルの解析は必要 | テンポの誤差、offset の誤差 ±50ms 以内(窓が短いときは窓に応じて緩める)、ノイズ・無音・短い音声の拒否、`bpm_range` と倍テンポの扱い |
 
 - 結合テストは `pytest.mark.integration` で分け、ffmpeg が見つからなければスキップする。
-- `.github/workflows/ci.yml` に、Windows / Ubuntu / macOS × Python 3.10 / 3.12 のマトリクスで全テストを実行する設定がある。**未実行**(GitHub リポジトリがない環境で書いたため)。Windows ネイティブは第一ターゲットだが、この環境では実行できないので、CI が唯一の自動テストになる。
+- `.github/workflows/ci.yml` に、Windows / Ubuntu / macOS × Python 3.10 / 3.12 のマトリクスで全テストを実行する設定がある。2026-11-16 から実行しており、6 ジョブすべて合格(経緯は TESTING.md §1)。止まったテストが CI を占有しないよう、1 テスト 5 分(`pytest-timeout`)・1 ジョブ 30 分で打ち切る。
 - 開発中は `pytest -m "not integration"`(ffmpeg 不要。約 30 秒)で速く回し、全テスト(数分)は、変更をまとめたときに実行する。
 
 ## 14. リスクと対応方針
@@ -528,7 +528,7 @@ MovieKaleidoscope/
 8. `tile` の「組み合わせ」は、`tile` 内の transform(`none` / `scroll` / `rotate` / `scroll+rotate`)で表現する。任意のエフェクト同士の重ね掛けは将来対応とする。
 9. セグメント生成の進捗は、クリップ数ではなくフレーム数で報告する。
 10. 全セグメントを BT.709 / limited range に正規化して、タグを明示する(§3.3)。
-11. 未了のもの: Windows ネイティブでの実行(性能・全テスト。GUI の見た目の確認を含む)、CI の実行。
+11. 未了だったもの(Windows ネイティブでの実行(性能・全テスト。GUI の見た目の確認を含む)、CI の実行)は、2026-11-16 までにすべて完了(TESTING.md)。
 12. GUI は tkinter で作る(§17)。
 
 

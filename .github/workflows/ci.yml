@@ -1,7 +1,5 @@
 # Runs the whole test suite on Windows, Linux and macOS.
-# Windows is the primary target; this is the only place it gets tested automatically.
-# (Not yet run: written without access to a GitHub repository. If a job fails on the
-#  ffmpeg setup step, that step is the first thing to look at.)
+# Windows is the primary target. All six jobs pass since 2026-11-16 (see docs/TESTING.md).
 name: tests
 
 on:
