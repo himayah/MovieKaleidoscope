@@ -21,14 +21,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # setup-ffmpeg only supports x64; macos-latest is arm64, so use Homebrew there.
       - uses: FedericoCarboni/setup-ffmpeg@v3
+        if: runner.os != 'macOS'
         id: ffmpeg
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
       - name: Show tool versions
         run: |
           ffmpeg -version
           python --version
       - name: Install
-        run: python -m pip install -e ".[dev]"
+        # The annotate plugin turns test failures into annotations, which can be read
+        # without signing in (the raw job logs cannot).
+        run: python -m pip install -e ".[dev]" pytest-github-actions-annotate-failures
       - name: "Install a virtual display (Linux: the GUI tests need one)"
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y xvfb
