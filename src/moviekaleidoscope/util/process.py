@@ -28,6 +28,7 @@ def run_capture(
         capture_output=True,
         stdin=subprocess.DEVNULL,
         timeout=timeout,
+        creationflags=NO_WINDOW,
     )
     return (
         cp.returncode,
@@ -39,14 +40,19 @@ def run_capture(
 def run_bytes(args: Sequence[str | os.PathLike], timeout: float | None = None) -> tuple[int, bytes, str]:
     """Like run_capture, but stdout is returned as raw bytes (e.g. decoded audio)."""
     cp = subprocess.run([os.fspath(a) for a in args], capture_output=True,
-                        stdin=subprocess.DEVNULL, timeout=timeout)
+                        stdin=subprocess.DEVNULL, timeout=timeout, creationflags=NO_WINDOW)
     return cp.returncode, cp.stdout, cp.stderr.decode("utf-8", "replace")
 
+
+# Windows: no child gets a console window. The GUI (mkaleido-gui.exe, pythonw) has no console,
+# so every console program it started (ffprobe, ffmpeg, taskkill) opened an empty black window
+# of its own. All children's stdio is redirected, so none of them needs a console.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # Windows: ffmpeg runs in its own process group, so a console Ctrl+C reaches only us and we stop
 # it ourselves (terminate()). Otherwise ffmpeg died first, and a worker took that for a failed
 # clip -- warned and retried it with another input -- before the main thread saw the interrupt.
-CHILD_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+CHILD_FLAGS = (subprocess.CREATE_NEW_PROCESS_GROUP | NO_WINDOW) if os.name == "nt" else 0
 
 
 def terminate(proc: subprocess.Popen) -> None:
@@ -60,7 +66,7 @@ def terminate(proc: subprocess.Popen) -> None:
     taskkill = shutil.which("taskkill") if os.name == "nt" else None
     if taskkill:
         subprocess.run([taskkill, "/PID", str(proc.pid), "/T", "/F"], stdin=subprocess.DEVNULL,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
     else:
         proc.terminate()
     try:

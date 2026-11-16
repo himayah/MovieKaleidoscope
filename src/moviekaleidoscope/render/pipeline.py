@@ -14,10 +14,11 @@ from typing import Callable
 
 from ..config import RuntimeConfig
 from ..errors import Cancelled, RenderError
-from ..media.probe import VideoInfo
+from ..media.probe import VideoInfo, probe_video
 from ..media.tools import Tools
 from ..planner.plan import ClipSpec, Plan
 from ..planner.planner import reselect_source
+from ..util.memory import available_bytes
 from ..util.process import run_capture, run_cancellable
 from ..util.progress import ProgressCallback, null_progress
 from .frame_segment import render_frame_segment
@@ -38,6 +39,46 @@ class _AnyEvent:
 
 def default_jobs() -> int:
     return max(1, (os.cpu_count() or 2) // 2)
+
+
+# Memory of one running segment (ffmpeg decoding + encoding, plus the Python frame pipeline).
+# Measured on Windows, 2026-11-16, at jobs=12: 4K sources (8.3 MP) took 17.2 GB in all, about
+# 1.4 GB per job; 720p sources (0.9 MP) 2.1 GB, about 0.17 GB per job. The decoder dominates.
+JOB_BASE_BYTES = 100 * 2**20
+JOB_BYTES_PER_SOURCE_PIXEL = 170
+MEMORY_SHARE = 0.7               # leave the rest of the free memory to the system and other apps
+
+
+def job_memory_estimate(source_pixels: int, plan: Plan) -> int:
+    """Bytes one job may need. `reverse` holds its whole clip (yuv420p, up to 10 s) in memory."""
+    est = JOB_BASE_BYTES + JOB_BYTES_PER_SOURCE_PIXEL * source_pixels
+    if any(e.type == "reverse" for c in plan.clips for e in c.effects):
+        out = plan.output
+        longest = max(c.frames for c in plan.clips)
+        est += int(out.width * out.height * 1.5 * longest)
+    return est
+
+
+def auto_jobs(source_pixels: int, plan: Plan, available: int | None) -> int:
+    """CPU-based default, lowered so that the jobs together fit in the free memory."""
+    jobs = default_jobs()
+    if available is None:
+        return jobs
+    fit = max(1, int(available * MEMORY_SHARE // job_memory_estimate(source_pixels, plan)))
+    return min(jobs, fit)
+
+
+def _largest_source_pixels(plan: Plan, tools: Tools, inputs: list[VideoInfo] | None) -> int:
+    if inputs:
+        return max(v.width * v.height for v in inputs)
+    best = 0                                       # --from-plan: probe the few files it uses
+    for path in {c.source.path for c in plan.clips}:
+        try:
+            v = probe_video(path, tools)
+        except Exception:                          # noqa: BLE001 - only an estimate; render reports real errors
+            continue
+        best = max(best, v.width * v.height)
+    return best or plan.output.width * plan.output.height
 
 
 def _tail(text: str, n: int = 6) -> str:
@@ -105,7 +146,12 @@ def render_plan(
     When `inputs` is given, a failed clip is retried once with a different input
     (SPEC §3.2) and the plan is updated in place; otherwise any failure is fatal.
     """
-    jobs = runtime.jobs or default_jobs()
+    if runtime.jobs:
+        jobs = runtime.jobs
+    else:
+        jobs = auto_jobs(_largest_source_pixels(plan, tools, inputs), plan, available_bytes())
+        if jobs < default_jobs():
+            log.info("並列数: %d(空きメモリに合わせて減らしました。--jobs で指定できます)", jobs)
     jobs = max(1, min(jobs, len(plan.clips)))
     threads = max(1, (os.cpu_count() or 1) // jobs)
     stop = threading.Event()

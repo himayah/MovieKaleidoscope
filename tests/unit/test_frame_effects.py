@@ -76,8 +76,14 @@ def test_negate():
     f = lambda mix: proc("negate", {"mix": const(mix)})(FRAME, 0.3, 9)       # noqa: E731
     assert np.array_equal(f(0.0), FRAME)
     assert np.array_equal(f(1.0), 255 - FRAME)
-    half = f(0.5).astype(int)
-    assert np.abs(half - (FRAME.astype(int) + (255 - FRAME.astype(int))) / 2).max() <= 1
+    # Never a washed-out grey frame (C3, 2026-11-16: mix 0.5 made every pixel ~128): at least
+    # 60 % of the contrast is kept for any mix, and the picture leans to the nearer end.
+    for mix in np.linspace(0.0, 1.0, 41):
+        out = f(float(mix)).astype(float)
+        assert out.std() >= 0.6 * FRAME.std() - 1, mix
+        nearer = FRAME if mix < 0.5 else 255 - FRAME
+        farther = 255 - FRAME if mix < 0.5 else FRAME
+        assert np.abs(out - nearer).mean() < np.abs(out - farther).mean(), mix
     ramp = proc("negate", {"mix": Motion("ramp", 0.0, end=1.0).to_dict()})
     assert np.array_equal(ramp(FRAME, 0.0, 0), FRAME) and np.array_equal(ramp(FRAME, 2.0, 59), 255 - FRAME)
 

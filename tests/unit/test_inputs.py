@@ -75,6 +75,27 @@ def test_format_rounds_to_even():
     assert (f.width, f.height) == (1280, 720)
 
 
+@pytest.mark.parametrize("src,expected", [
+    ((3840, 2160), (1920, 1080)),
+    ((2160, 3840), (1080, 1920)),       # vertical 4K
+    ((2560, 1440), (1920, 1080)),
+    ((4096, 2160), (1920, 1012)),       # DCI 4K: long side limits (1013 rounded to even)
+    ((1920, 1080), (1920, 1080)),
+    ((1440, 1440), (1080, 1080)),       # square: short side limits
+    ((1280, 720), (1280, 720)),
+])
+def test_format_default_is_at_most_1080p(src, expected):
+    f = resolve_output_format(VideoConfig(), info(*src))
+    assert (f.width, f.height) == expected
+
+
+def test_format_explicit_size_may_exceed_1080p():
+    f = resolve_output_format(VideoConfig(width=3840, height=2160), info(3840, 2160))
+    assert (f.width, f.height) == (3840, 2160)
+    f = resolve_output_format(VideoConfig(width=3840), info(3840, 2160))
+    assert (f.width, f.height) == (3840, 2160)
+
+
 def test_format_one_dimension_keeps_aspect():
     f = resolve_output_format(VideoConfig(width=640), info(1920, 1080))
     assert (f.width, f.height) == (640, 360)
@@ -85,6 +106,28 @@ def test_format_one_dimension_keeps_aspect():
 def test_format_overrides():
     f = resolve_output_format(VideoConfig(width=800, height=600, fps=Fraction(24)), info())
     assert (f.width, f.height, f.fps) == (800, 600, Fraction(24))
+
+
+@pytest.mark.parametrize("src,expected", [
+    (Fraction(3120, 179), Fraction(15)),               # VFR sample (~17.43)
+    (Fraction(2997003, 100000), Fraction(30000, 1001)),  # phone-style 29.97003
+    (Fraction(5994, 100), Fraction(60000, 1001)),
+    (Fraction(2500, 99), Fraction(25)),                 # ~25.25
+    (Fraction(27), Fraction(25)),                       # 27/25 = 1.08 is closer than 29.97/27 = 1.11
+    (Fraction(1), Fraction(15)),
+    (Fraction(119), Fraction(120)),
+])
+def test_format_default_fps_snaps_to_standard(src, expected):
+    assert resolve_output_format(VideoConfig(), info(fps=src)).fps == expected
+
+
+@pytest.mark.parametrize("fps", [Fraction(24000, 1001), Fraction(25), Fraction(30000, 1001), Fraction(60)])
+def test_format_standard_fps_kept(fps):
+    assert resolve_output_format(VideoConfig(), info(fps=fps)).fps == fps
+
+
+def test_format_explicit_fps_not_snapped():
+    assert resolve_output_format(VideoConfig(fps=Fraction(17)), info()).fps == Fraction(17)
 
 
 @pytest.mark.parametrize("fps", [Fraction(1, 2), Fraction(240)])

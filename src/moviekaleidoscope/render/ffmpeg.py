@@ -118,6 +118,16 @@ def encoder_args(enc: EncodeSettings) -> list[str]:
             "-color_range", "tv"]
 
 
+def output_rate_args(fps) -> list[str]:
+    """The output frame rate, stated explicitly.
+
+    The `fps` filter already puts every frame on the output grid, but ffmpeg's CFR step at the
+    output uses the frame rate the filter graph *reports*. After `reverse`, ffmpeg 7.0.2 (the
+    static Linux build) reports none, assumes 25 fps, and dropped every 6th frame of a 30 fps
+    clip (60 -> 51). 4.4 and 7.1+ keep the rate. `-r` works on every version."""
+    return ["-r", _fps_arg(fps)]
+
+
 def segment_command(tools: Tools, clip: ClipSpec, plan: Plan, enc: EncodeSettings,
                     dest: Path, threads: int = 0) -> list[str]:
     """One ffmpeg process: decode, filter and encode a clip that has no frame-backend effect."""
@@ -125,17 +135,18 @@ def segment_command(tools: Tools, clip: ClipSpec, plan: Plan, enc: EncodeSetting
     assert not chain.uses_frame_backend
     cmd = [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
            *input_args(clip, chain), "-an", "-sn", "-dn",
-           "-vf", ",".join([*chain.filters, TAG_BT709]), "-frames:v", str(clip.frames), *encoder_args(enc)]
+           "-vf", ",".join([*chain.filters, TAG_BT709]), "-frames:v", str(clip.frames),
+           *output_rate_args(plan.output.fps), *encoder_args(enc)]
     if threads > 0:
         cmd += ["-threads", str(threads)]
     return [*cmd, str(dest)]
 
 
-def decode_command(tools: Tools, clip: ClipSpec, chain: ClipChain) -> list[str]:
+def decode_command(tools: Tools, clip: ClipSpec, chain: ClipChain, fps) -> list[str]:
     """Decode + filter a clip to raw RGB frames on stdout (for the frame backend)."""
     return [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
             *input_args(clip, chain), "-an", "-sn", "-dn",
-            "-vf", ",".join(chain.filters), "-frames:v", str(clip.frames),
+            "-vf", ",".join(chain.filters), "-frames:v", str(clip.frames), *output_rate_args(fps),
             "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
 
 

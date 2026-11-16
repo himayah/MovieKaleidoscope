@@ -40,7 +40,7 @@ def render_frame_segment(tools: Tools, clip: ClipSpec, plan: Plan, enc: EncodeSe
     w, h, fps = out.width, out.height, float(out.fps)
     processors: Sequence = chain.processors
     with tempfile.TemporaryFile() as dec_err, tempfile.TemporaryFile() as enc_err:
-        dec = subprocess.Popen(decode_command(tools, clip, chain), stdin=subprocess.DEVNULL,
+        dec = subprocess.Popen(decode_command(tools, clip, chain, out.fps), stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=dec_err, bufsize=w * h * 3 * 2,
                                creationflags=CHILD_FLAGS)
         enc_p = subprocess.Popen(encode_command(tools, plan, enc, dest, threads), stdin=subprocess.PIPE,
