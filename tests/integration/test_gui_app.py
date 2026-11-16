@@ -74,10 +74,25 @@ def dialogs(monkeypatch):
     return box
 
 
+MAX_EVENTS = 2000
+
+
+def process_events(root: tk.Misc) -> None:
+    """What `update()` does, but bounded.
+
+    `update()` returns only once no event is pending. On macOS CI (Aqua Tk 8.6.16) native events
+    kept arriving after a few windows had come and gone (more than 2000 per call, with no Tcl
+    timer pending but the app's own poll), so it never returned and the job hung for hours.
+    `mainloop()` in the real app has no such "until idle" step."""
+    n = 0
+    while n < MAX_EVENTS and root.tk.dooneevent(tk._tkinter.DONT_WAIT):
+        n += 1
+
+
 def pump(app: App, until, timeout=90.0):
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
-        app.root.update()
+        process_events(app.root)
         app.poll_now()           # not via the 100 ms timer: Tk timers follow the wall clock, which can jump (WSL2)
         if until():
             return
@@ -224,7 +239,7 @@ def test_cancel_from_the_window(app, dialogs, dummy, tmp_path):
     app.start()
     t0 = time.monotonic()
     while time.monotonic() - t0 < 1.0:
-        app.root.update()
+        process_events(app.root)
         app.poll_now()
         time.sleep(0.02)
     app.cancel()
@@ -306,7 +321,7 @@ def test_closing_during_a_job_asks_first(app, dialogs, dummy, tmp_path):
     app.start()
     t0 = time.monotonic()
     while time.monotonic() - t0 < 1.0:
-        app.root.update()
+        process_events(app.root)
         app.poll_now()
         time.sleep(0.02)
     dialogs.ask_yes = False
