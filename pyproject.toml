@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "moviekaleidoscope"
 version = "0.1.0"
 description = "Cut-and-paste psychedelic video generator (no generative AI)."
+license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
