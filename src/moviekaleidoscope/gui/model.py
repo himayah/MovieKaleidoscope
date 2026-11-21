@@ -150,9 +150,10 @@ def from_config(cfg: Config) -> GuiSettings:
     # Keep what has no field: weights, ranges, extensions, plan path, audio window and offset, ...
     s.base = {
         "extensions": full["extensions"], "plan": full["plan"],
+        "video": {"backend": full["video"]["backend"]},
         "audio": {"beat_offset": full["audio"]["beat_offset"], "bpm_range": full["audio"]["bpm_range"]},
         "effects": {"weights": full["effects"]["weights"], "params": full["effects"]["params"]},
-        "runtime": {k: full["runtime"][k] for k in ("work_dir", "keep_temp", "ffprobe")},
+        "runtime": {k: full["runtime"][k] for k in ("work_dir", "keep_temp", "ffprobe", "power_plan")},
     }
     return s
 

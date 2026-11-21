@@ -23,6 +23,7 @@ X264_PRESETS = (
     "ultrafast", "superfast", "veryfast", "faster", "fast",
     "medium", "slow", "slower", "veryslow",
 )
+VIDEO_BACKENDS = ("auto", "software", "nvenc")
 CUT_MODES = ("auto", "fixed", "random", "beat")
 DEFAULT_EXTENSIONS = (
     "mp4", "mov", "mkv", "avi", "webm", "m4v", "mpg", "mpeg", "wmv", "flv",
@@ -39,6 +40,7 @@ class VideoConfig:
     fps: Fraction | None = None
     crf: int = 18
     preset: str = "medium"
+    backend: str = "auto"   # "auto" | "software" | "nvenc"
 
 
 @dataclass
@@ -74,6 +76,7 @@ class RuntimeConfig:
     keep_temp: bool = False
     ffmpeg: str | None = None
     ffprobe: str | None = None
+    power_plan: bool = True  # temporarily switch to "High performance" while rendering (Windows)
 
 
 @dataclass
@@ -107,7 +110,7 @@ class Config:
             "seed": self.seed,
             "overwrite": self.overwrite,
             "video": {"width": v.width, "height": v.height, "fps": None if v.fps is None else str(v.fps),
-                      "crf": v.crf, "preset": v.preset},
+                      "crf": v.crf, "preset": v.preset, "backend": v.backend},
             "audio": {"file": None if a.file is None else str(a.file), "start": a.start, "bpm": a.bpm,
                       "beat_offset": a.beat_offset, "bpm_range": list(a.bpm_range)},
             "cut": {"mode": c.mode, "fixed": c.fixed, "random": {"min": c.random_min, "max": c.random_max},
@@ -117,7 +120,8 @@ class Config:
                         "params": {k: dict(x) for k, x in e.params.items()}},
             "runtime": {"jobs": "auto" if r.jobs is None else r.jobs,
                         "work_dir": None if r.work_dir is None else str(r.work_dir),
-                        "keep_temp": r.keep_temp, "ffmpeg": r.ffmpeg, "ffprobe": r.ffprobe},
+                        "keep_temp": r.keep_temp, "ffmpeg": r.ffmpeg, "ffprobe": r.ffprobe,
+                        "power_plan": r.power_plan},
         }
 
 
@@ -286,7 +290,7 @@ def config_from_dict(raw: dict) -> Config:
 
     # video
     v = _section(raw, "video")
-    _check_keys(v, ("width", "height", "fps", "crf", "preset"), "video")
+    _check_keys(v, ("width", "height", "fps", "crf", "preset", "backend"), "video")
     cfg.video.width = _opt_number(v.get("width"), "video.width", integer=True, gt=0)
     cfg.video.height = _opt_number(v.get("height"), "video.height", integer=True, gt=0)
     if v.get("fps") is not None:
@@ -297,6 +301,10 @@ def config_from_dict(raw: dict) -> Config:
         if v["preset"] not in X264_PRESETS:
             raise ConfigError(f"video.preset: {', '.join(X264_PRESETS)} のいずれかを指定してください")
         cfg.video.preset = v["preset"]
+    if "backend" in v:
+        if v["backend"] not in VIDEO_BACKENDS:
+            raise ConfigError(f"video.backend: {', '.join(VIDEO_BACKENDS)} のいずれかを指定してください")
+        cfg.video.backend = v["backend"]
 
     # audio
     a = _section(raw, "audio")
@@ -361,7 +369,7 @@ def config_from_dict(raw: dict) -> Config:
 
     # runtime
     r = _section(raw, "runtime")
-    _check_keys(r, ("jobs", "work_dir", "keep_temp", "ffmpeg", "ffprobe"), "runtime")
+    _check_keys(r, ("jobs", "work_dir", "keep_temp", "ffmpeg", "ffprobe", "power_plan"), "runtime")
     jobs = r.get("jobs", "auto")
     cfg.runtime.jobs = None if jobs in (None, "auto") else _number(jobs, "runtime.jobs", integer=True, ge=1)
     cfg.runtime.work_dir = _opt_path(r.get("work_dir"), "runtime.work_dir")
@@ -369,6 +377,8 @@ def config_from_dict(raw: dict) -> Config:
         cfg.runtime.keep_temp = _boolean(r["keep_temp"], "runtime.keep_temp")
     cfg.runtime.ffmpeg = _opt_str(r.get("ffmpeg"), "runtime.ffmpeg")
     cfg.runtime.ffprobe = _opt_str(r.get("ffprobe"), "runtime.ffprobe")
+    if "power_plan" in r:
+        cfg.runtime.power_plan = _boolean(r["power_plan"], "runtime.power_plan")
     return cfg
 
 

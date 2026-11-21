@@ -20,6 +20,7 @@ from .planner.planner import build_plan, resolve_cut_mode
 from .planner.rng import new_seed
 from .render.ffmpeg import EncodeSettings
 from .render.pipeline import render_plan as _render_plan
+from .util.power import high_performance_power_plan
 from .util.progress import ProgressCallback, null_progress
 
 log = logging.getLogger("moviekaleidoscope")
@@ -133,11 +134,12 @@ def render_plan(plan: Plan, cfg: Config, output: Path, tools: Tools | None = Non
     if inputs is None:                 # replay: nothing was validated in this run
         check_plan_files(plan)
     tools = tools or locate_tools(cfg.runtime.ffmpeg, cfg.runtime.ffprobe)
-    return _render_plan(
-        plan, tools=tools, enc=EncodeSettings(cfg.video.crf, cfg.video.preset),
-        runtime=cfg.runtime, output=output, progress=progress, cancel=cancel,
-        inputs=None if inputs is None else inputs.valid,
-    )
+    with high_performance_power_plan(enabled=cfg.runtime.power_plan):
+        return _render_plan(
+            plan, tools=tools, enc=EncodeSettings(cfg.video.crf, cfg.video.preset, cfg.video.backend),
+            runtime=cfg.runtime, output=output, progress=progress, cancel=cancel,
+            inputs=None if inputs is None else inputs.valid,
+        )
 
 
 def render_saved_plan(plan_path: Path, cfg: Config,

@@ -12,10 +12,20 @@ from ..media.tools import Tools
 from ..planner.plan import ClipSpec, Plan
 
 
+# NVENC preset: "slow"=hq 2-pass ... "p7"=slowest/best quality. p5 trades a little speed for
+# quality closer to libx264 "medium" (SPEC: GPU redesign §A).
+NVENC_PRESET = "p5"
+
 @dataclass(frozen=True)
 class EncodeSettings:
     crf: int = 18
     preset: str = "medium"
+    # "auto" | "software" | "nvenc". Defaults to "software", NOT "auto": any code that builds
+    # EncodeSettings directly (tests, scripts) must opt in to GPU encoding explicitly, so it never
+    # silently starts using whatever hardware happens to be in the machine it runs on. The "auto"
+    # default a user actually gets lives one level up, in VideoConfig.backend (config.py); the CLI
+    # and GUI resolve it to this field via render_plan() (SPEC: GPU redesign §A).
+    backend: str = "software"
 
 
 def _fps_arg(fps) -> str:
@@ -113,9 +123,16 @@ def encoder_args(enc: EncodeSettings) -> list[str]:
     # on how a given ffmpeg version writes those (verified gap-free on 4.4 either way).
     # Every segment is BT.709 / limited range and says so explicitly, whatever its source was:
     # the final file takes its tags from the first segment, so they must all agree.
-    return ["-c:v", "libx264", "-preset", enc.preset, "-crf", str(enc.crf), "-pix_fmt", "yuv420p",
-            "-bf", "0", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-            "-color_range", "tv"]
+    common = ["-pix_fmt", "yuv420p", "-bf", "0", "-colorspace", "bt709",
+              "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
+    if enc.backend == "nvenc":
+        # -cq uses the same 0-51 scale as libx264's -crf, so the configured value carries over.
+        # -spatial-aq/-temporal-aq (hyphenated): the underscore aliases were removed in ffmpeg 9.0
+        # ("Remove deprecated NVENC options..."); the hyphenated names work on old and new builds.
+        return ["-c:v", "h264_nvenc", "-preset", NVENC_PRESET, "-tune", "hq",
+                "-rc", "vbr", "-cq", str(enc.crf), "-b:v", "0",
+                "-spatial-aq", "1", "-temporal-aq", "1", *common]
+    return ["-c:v", "libx264", "-preset", enc.preset, "-crf", str(enc.crf), *common]
 
 
 def output_rate_args(fps) -> list[str]:
@@ -137,7 +154,7 @@ def segment_command(tools: Tools, clip: ClipSpec, plan: Plan, enc: EncodeSetting
            *input_args(clip, chain), "-an", "-sn", "-dn",
            "-vf", ",".join([*chain.filters, TAG_BT709]), "-frames:v", str(clip.frames),
            *output_rate_args(plan.output.fps), *encoder_args(enc)]
-    if threads > 0:
+    if threads > 0 and enc.backend != "nvenc":   # -threads has no meaning for h264_nvenc
         cmd += ["-threads", str(threads)]
     return [*cmd, str(dest)]
 
@@ -157,7 +174,7 @@ def encode_command(tools: Tools, plan: Plan, enc: EncodeSettings, dest: Path, th
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{out.width}x{out.height}",
            "-framerate", _fps_arg(out.fps), "-i", "pipe:0",
            "-vf", f"scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,{TAG_BT709}", *encoder_args(enc)]
-    if threads > 0:
+    if threads > 0 and enc.backend != "nvenc":   # -threads has no meaning for h264_nvenc
         cmd += ["-threads", str(threads)]
     return [*cmd, str(dest)]
 

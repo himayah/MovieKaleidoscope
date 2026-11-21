@@ -69,10 +69,22 @@ def test_no_audio_overrides_file(tmp_path):
     {"cut": {"random": {"min": 5, "max": 1}}}, {"audio": {"bpm_range": [180, 70]}},
     {"audio": {"bpm": -1}}, {"duration": 0}, {"seed": -1}, {"recursive": "yes"},
     {"runtime": {"jobs": 0}}, {"video": {"width": 0}}, {"inputs": 5},
+    {"video": {"backend": "cuda"}}, {"runtime": {"power_plan": "yes"}},
 ])
 def test_validation_errors(bad):
     with pytest.raises(ConfigError):
         config_from_dict(bad)
+
+
+def test_video_backend():
+    assert config_from_dict({}).video.backend == "auto"
+    assert config_from_dict({"video": {"backend": "nvenc"}}).video.backend == "nvenc"
+    assert config_from_dict({"video": {"backend": "software"}}).video.backend == "software"
+
+
+def test_runtime_power_plan():
+    assert config_from_dict({}).runtime.power_plan is True
+    assert config_from_dict({"runtime": {"power_plan": False}}).runtime.power_plan is False
 
 
 def test_jobs_auto():
@@ -183,12 +195,12 @@ def test_effects_exclude_and_cli_options():
 @pytest.mark.parametrize("raw", [
     {},
     {"inputs": ["a.mp4", "/abs/dir"], "output": "o.mp4", "duration": 90, "seed": 5, "overwrite": True, "recursive": True},
-    {"video": {"width": 1280, "height": 720, "fps": "30000/1001", "crf": 20, "preset": "slow"}},
+    {"video": {"width": 1280, "height": 720, "fps": "30000/1001", "crf": 20, "preset": "slow", "backend": "nvenc"}},
     {"audio": {"file": "bgm.wav", "start": 2.5, "bpm": 128.4, "beat_offset": 0.2, "bpm_range": [80, 160]}},
     {"cut": {"mode": "random", "random": {"min": 0.5, "max": 3}, "beats": [1, 2, 4], "fixed": 1.25}},
     {"effects": {"enabled": ["hue", "flip"], "exclude": ["flip"], "weights": {"hue": 3.0},
                  "params": {"rgbshift": {"amount": {"min": 2, "max": 9}}, "reverse": {"max_sec": 6}}}},
-    {"runtime": {"jobs": 3, "work_dir": "/tmp/w", "keep_temp": True, "ffmpeg": "/usr/bin/ffmpeg"}},
+    {"runtime": {"jobs": 3, "work_dir": "/tmp/w", "keep_temp": True, "ffmpeg": "/usr/bin/ffmpeg", "power_plan": False}},
     {"extensions": ["mp4", "mov"], "plan": "p.json"},
 ])
 def test_file_dict_round_trips(raw):

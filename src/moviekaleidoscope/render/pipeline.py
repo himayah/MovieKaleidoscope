@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import dataclasses
 import logging
 import os
 import shutil
@@ -16,13 +18,14 @@ from ..config import RuntimeConfig
 from ..errors import Cancelled, RenderError
 from ..media.probe import VideoInfo, probe_video
 from ..media.tools import Tools
+from ..effects import registry
 from ..planner.plan import ClipSpec, Plan
 from ..planner.planner import reselect_source
 from ..util.memory import available_bytes
 from ..util.process import run_capture, run_cancellable
 from ..util.progress import ProgressCallback, null_progress
-from .frame_segment import render_frame_segment
-from .ffmpeg import EncodeSettings, build_chain, concat_command, segment_command
+from .frame_segment import FRAME_QUEUE_MAXSIZE, render_frame_segment
+from .ffmpeg import EncodeSettings, NVENC_PRESET, build_chain, concat_command, segment_command
 
 log = logging.getLogger("moviekaleidoscope")
 
@@ -37,8 +40,26 @@ class _AnyEvent:
         return any(e.is_set() for e in self._events)
 
 
-def default_jobs() -> int:
-    return max(1, (os.cpu_count() or 2) // 2)
+def default_jobs(backend: str = "software", frame_backend: bool = False) -> int:
+    """CPU-based default parallelism.
+
+    `backend == "nvenc"` frees the CPU from libx264 encoding, so more jobs fit -- but only when
+    no clip uses the Python frame backend: its per-frame orchestration holds the GIL, so more
+    threads do not reliably speed it up (SPEC: GPU redesign review finding, 2026-11-21)."""
+    cpu = os.cpu_count() or 2
+    if backend == "nvenc" and not frame_backend:
+        return max(1, cpu * 3 // 4)
+    return max(1, cpu // 2)
+
+
+def _uses_frame_backend(plan: Plan) -> bool:
+    """Whether any clip needs the Python frame backend (not just ffmpeg filters).
+
+    Goes through the registry (`backend_for`), not `build_chain()`: the latter needs a fully
+    sampled RenderContext and motion params for every effect, which this check should not
+    require (e.g. it also runs from tests that build a Plan with bare, unsampled EffectSpecs)."""
+    return any(registry.get(e.type).backend_for(e.params) == "frame"
+              for c in plan.clips for e in c.effects)
 
 
 # Memory of one running segment (ffmpeg decoding + encoding, plus the Python frame pipeline).
@@ -56,16 +77,124 @@ def job_memory_estimate(source_pixels: int, plan: Plan) -> int:
         out = plan.output
         longest = max(c.frames for c in plan.clips)
         est += int(out.width * out.height * 1.5 * longest)
+    if _uses_frame_backend(plan):
+        out = plan.output
+        est += FRAME_QUEUE_MAXSIZE * out.width * out.height * 3   # the frame reader's RGB24 lookahead
     return est
 
 
-def auto_jobs(source_pixels: int, plan: Plan, available: int | None) -> int:
+def auto_jobs(source_pixels: int, plan: Plan, available: int | None,
+              backend: str = "software", frame_backend: bool | None = None) -> int:
     """CPU-based default, lowered so that the jobs together fit in the free memory."""
-    jobs = default_jobs()
+    if frame_backend is None:
+        frame_backend = _uses_frame_backend(plan)
+    jobs = default_jobs(backend, frame_backend)
     if available is None:
         return jobs
     fit = max(1, int(available * MEMORY_SHARE // job_memory_estimate(source_pixels, plan)))
     return min(jobs, fit)
+
+
+# ---------------------------------------------------------------------------------------------
+# GPU encoder backend (SPEC: GPU redesign §A). Cached per ffmpeg path: the probe briefly
+# initialises the GPU encoder, not worth repeating on every render_plan() call in a long-lived
+# process (e.g. the GUI).
+# ---------------------------------------------------------------------------------------------
+_backend_cache: dict[str, str] = {}
+
+
+def resolve_encoder_backend(tools: Tools, requested: str) -> str:
+    """Resolve "auto" to "software"/"nvenc"; an explicit request passes through unchanged."""
+    if requested != "auto":
+        return requested
+    cached = _backend_cache.get(tools.ffmpeg)
+    if cached is None:
+        cached = _probe_nvenc(tools)
+        _backend_cache[tools.ffmpeg] = cached
+    return cached
+
+
+def _probe_nvenc(tools: Tools) -> str:
+    code, out, _ = run_capture([tools.ffmpeg, "-hide_banner", "-encoders"], timeout=10)
+    if code != 0 or "h264_nvenc" not in out:
+        return "software"
+    try:
+        code, _, _ = run_capture(
+            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+             "-i", "color=c=black:s=256x256:d=0.2", "-frames:v", "4",
+             "-c:v", "h264_nvenc", "-preset", NVENC_PRESET, "-f", "null", "-"],
+            timeout=10)
+    except (OSError, TimeoutError):
+        code = 1
+    if code != 0:
+        log.warning("NVENC を初期化できないため software エンコードを使います")
+        return "software"
+    return "nvenc"
+
+
+# ---------------------------------------------------------------------------------------------
+# Work directory placement (SPEC: GPU redesign §D). This is a free-space safeguard, not a speed
+# optimisation: %TEMP%'s own drive is kept unless it is nearly full, in which case the fixed
+# drive with the most free space is used instead. Cached per process (drives don't change).
+# ---------------------------------------------------------------------------------------------
+MIN_FREE_BYTES = 20 * 2**30   # 20GB; below this, switch away from %TEMP%'s drive
+DRIVE_FIXED = 3
+_UNSET = object()
+_work_drive_cache: Path | None | object = _UNSET
+
+
+def _fixed_drive_roots() -> list[Path]:
+    """Roots of locally-attached fixed drives (Windows only; empty elsewhere)."""
+    if os.name != "nt":
+        return []
+    try:
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+    except (AttributeError, OSError):
+        return []
+    roots = []
+    for i in range(26):
+        if not (mask >> i) & 1:
+            continue
+        root = f"{chr(65 + i)}:\\"
+        try:
+            if ctypes.windll.kernel32.GetDriveTypeW(root) == DRIVE_FIXED:
+                roots.append(Path(root))
+        except OSError:
+            continue
+    return roots
+
+
+def _pick_fastest_free_drive(candidates: list[Path]) -> Path | None:
+    """The candidate with the most free space (None if none can be read)."""
+    best, best_free = None, -1
+    for root in candidates:
+        try:
+            free = shutil.disk_usage(root).free
+        except OSError:
+            continue
+        if free > best_free:
+            best, best_free = root, free
+    return best
+
+
+def _choose_work_drive() -> Path | None:
+    """None outside Windows: `Path.anchor` is always "/" on POSIX (one filesystem root, not a
+    per-drive letter), so this drive-letter logic doesn't apply there -- `_make_work_dir()` then
+    falls back to the plain system temp dir, as it always did before this optimisation."""
+    global _work_drive_cache
+    if _work_drive_cache is not _UNSET:
+        return _work_drive_cache
+    if os.name != "nt":
+        _work_drive_cache = None
+        return None
+    temp_drive = Path(tempfile.gettempdir()).anchor
+    try:
+        temp_free = shutil.disk_usage(temp_drive).free
+    except OSError:
+        temp_free = -1
+    drive = Path(temp_drive) if temp_free >= MIN_FREE_BYTES else _pick_fastest_free_drive(_fixed_drive_roots())
+    _work_drive_cache = drive
+    return drive
 
 
 def _largest_source_pixels(plan: Plan, tools: Tools, inputs: list[VideoInfo] | None) -> int:
@@ -116,6 +245,11 @@ def _make_work_dir(runtime: RuntimeConfig) -> Path:
     if runtime.work_dir is not None:
         runtime.work_dir.mkdir(parents=True, exist_ok=True)
         return Path(tempfile.mkdtemp(prefix="mkaleido_", dir=runtime.work_dir))
+    drive = _choose_work_drive()
+    base = drive / "mkaleido_tmp" if drive else None
+    if base is not None:
+        base.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix="mkaleido_", dir=base))
     return Path(tempfile.mkdtemp(prefix="mkaleido_"))
 
 
@@ -146,11 +280,16 @@ def render_plan(
     When `inputs` is given, a failed clip is retried once with a different input
     (SPEC §3.2) and the plan is updated in place; otherwise any failure is fatal.
     """
+    backend = resolve_encoder_backend(tools, enc.backend)
+    enc = dataclasses.replace(enc, backend=backend)
+    frame_backend = _uses_frame_backend(plan)
+
     if runtime.jobs:
         jobs = runtime.jobs
     else:
-        jobs = auto_jobs(_largest_source_pixels(plan, tools, inputs), plan, available_bytes())
-        if jobs < default_jobs():
+        jobs = auto_jobs(_largest_source_pixels(plan, tools, inputs), plan, available_bytes(),
+                         backend, frame_backend)
+        if jobs < default_jobs(backend, frame_backend):
             log.info("並列数: %d(空きメモリに合わせて減らしました。--jobs で指定できます)", jobs)
     jobs = max(1, min(jobs, len(plan.clips)))
     threads = max(1, (os.cpu_count() or 1) // jobs)

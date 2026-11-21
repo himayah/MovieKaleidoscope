@@ -35,13 +35,51 @@ mkaleido --version
 
 ffmpeg が PATH にない場合は、`--ffmpeg C:\tools\ffmpeg\bin\ffmpeg.exe` で指定するか、環境変数 `FFMPEG_BIN` / `FFPROBE_BIN` を設定します。
 
+## ファイルの構成
+
+```
+MovieKaleidoscope/
+├── src/moviekaleidoscope/
+│   ├── cli.py           コマンドライン(mkaleido)のエントリポイント
+│   ├── api.py            generate() / render_plan() など中心となる処理
+│   ├── config.py          設定ファイル(YAML)の読み込みと検証
+│   ├── planner/           乱数で「plan」(どの動画のどこを、どのエフェクトで使うか)を作る
+│   ├── render/            plan を実際の映像にする(ffmpeg 呼び出し、並列処理)
+│   ├── effects/           各エフェクト(万華鏡、反転、ソラライズなど)の実装
+│   ├── audio/             BGM の BPM 解析
+│   ├── media/             入力動画の検証、ffmpeg/ffprobe のラッパー
+│   ├── util/              電源プランの切り替え、メモリ見積り、進捗表示など
+│   └── gui/               GUI(mkaleido-gui)。tkinter 製
+├── tests/
+│   ├── unit/              ffmpeg なしで動く速いテスト
+│   ├── integration/       実際に ffmpeg を使うテスト
+│   └── tools/              テスト用のダミー動画・音声を作る道具
+├── docs/
+│   ├── SPEC.md            仕様と設計判断の記録
+│   ├── TESTING.md         テストの状況、未確認の項目
+│   └── images/             この README のスクリーンショットなど
+├── sample/                生成済みのサンプル動画と plan
+├── config.example.yaml    設定ファイルの全項目サンプル
+└── pyproject.toml         パッケージ定義(`mkaleido` / `mkaleido-gui` コマンドなど)
+```
+
 ## GUI
 
 コマンドを書かずに、画面で操作できます。
 
+### 起動
+
 ```
 mkaleido-gui                      # または python -m moviekaleidoscope.gui
 ```
+
+tkinter が必要です(Windows と macOS の公式の Python には含まれます。Debian / Ubuntu では `sudo apt install python3-tk`)。
+
+### 画面
+
+タブは上から「入力と出力」「音楽とカット」「見た目」「詳細」の 4 つです。
+
+![入力と出力タブ](docs/images/gui_input_output.png)
 
 | タブ | できること |
 |---|---|
@@ -50,11 +88,21 @@ mkaleido-gui                      # または python -m moviekaleidoscope.gui
 | 見た目 | 使うエフェクトを選ぶ。出力の幅・高さ・FPS・画質を決める |
 | 詳細 | シード、並列数、ffmpeg の場所 |
 
-- 「動画を作る」で生成します。進捗は画面の下に出て、「中止」でいつでも止められます。終わったら、フォルダを開くボタンや再生ボタンが使えます。
+「見た目」タブでは、使うエフェクトをチェックボックスで選び、出力の形式(幅・高さ・FPS・画質)を決めます。
+
+![見た目タブ](docs/images/gui_effects.png)
+
+### 操作の流れ
+
+1. 「入力と出力」タブで、`ファイルを追加...` / `フォルダを追加...` から動画を指定し、出力ファイルと長さを決める。
+2. 必要なら「音楽とカット」タブで BGM を指定する(省略すると固定長のカットになる)。
+3. 「見た目」タブで使うエフェクトと出力の形式を選ぶ(省略時は全エフェクト・入力に合わせた形式)。
+4. 画面下の「動画を作る」を押す。進捗バーが進み、「中止」でいつでも止められる。
+5. 終わったら「出力のフォルダを開く」「動画を再生」が使える。
+
 - 「構成(plan)だけ作る」と、メニューの「plan から動画を作り直す」は、コマンドライン版の `--plan-only` と `--from-plan` と同じです。
 - メニューの「設定を保存 / 開く」は、コマンドライン版と同じ設定ファイル(YAML)を読み書きします。GUI にない設定(エフェクトの重みなど)は、読み込んだファイルのものが保持されます。
 - 終了時の設定は記憶され、次の起動で復元されます(「上書きする」は除く)。
-- tkinter が必要です(Windows と macOS の公式の Python には含まれます。Debian / Ubuntu では `sudo apt install python3-tk`)。
 
 ## 使い方
 

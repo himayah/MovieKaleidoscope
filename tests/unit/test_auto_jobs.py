@@ -57,3 +57,30 @@ def test_never_below_one_and_unknown_memory_uses_cpu_default():
 def test_available_memory_is_readable_here():
     free = available_bytes()
     assert free is None or free > 0
+
+
+# ---- GPU redesign: backend/frame-backend-aware jobs (SPEC §B, §E) ---------------------------
+def test_default_jobs_raises_only_for_nvenc_without_frame_backend():
+    assert pipeline.default_jobs("software", False) == 12
+    assert pipeline.default_jobs("software", True) == 12
+    assert pipeline.default_jobs("nvenc", False) == 18       # cpu * 3 // 4, cpu=24
+    assert pipeline.default_jobs("nvenc", True) == 12        # frame backend: stays conservative (GIL)
+
+
+def test_uses_frame_backend_detects_python_effects():
+    assert pipeline._uses_frame_backend(plan(("hue",))) is False      # ffmpeg-filter effect
+    assert pipeline._uses_frame_backend(plan(("negate",))) is True    # frame-backend effect
+
+
+def test_job_memory_estimate_adds_the_frame_queue_for_frame_backend_plans():
+    from moviekaleidoscope.render.frame_segment import FRAME_QUEUE_MAXSIZE
+
+    ffmpeg_only = plan(("hue",), w=1920, h=1080)
+    frame_backend = plan(("negate",), w=1920, h=1080)
+    extra = job_memory_estimate(HD720, frame_backend) - job_memory_estimate(HD720, ffmpeg_only)
+    assert extra == FRAME_QUEUE_MAXSIZE * 1920 * 1080 * 3
+
+
+def test_auto_jobs_takes_backend_and_frame_backend():
+    assert auto_jobs(HD720, plan(("hue",)), 32 * GB, backend="nvenc", frame_backend=False) == 18
+    assert auto_jobs(HD720, plan(("negate",)), 32 * GB, backend="nvenc") == 12   # auto-detected
