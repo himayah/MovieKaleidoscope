@@ -35,6 +35,13 @@ mkaleido --version
 
 ffmpeg が PATH にない場合は、`--ffmpeg C:\tools\ffmpeg\bin\ffmpeg.exe` で指定するか、環境変数 `FFMPEG_BIN` / `FFPROBE_BIN` を設定します。
 
+`mkaleido --version` を実行しても `用語 'mkaleido' は...認識されません` のようなエラーになる場合は、ffmpeg ではなく **`mkaleido` / `mkaleido-gui` 自体が PATH に入っていない**状態です。多くは次のいずれかで直ります。
+
+- `python -m pip install -e .` を実際に実行したターミナルと、`mkaleido` を打つターミナルが違う Python を指している(複数バージョンの Python が入っている、仮想環境を有効化していない、など)。`python -m moviekaleidoscope.cli --version` が通るか確認し、通るならこちらが原因です。
+- Python インストーラーで「Add python.exe to PATH」にチェックを入れていない、または `pip install` がユーザー権限用のフォルダにスクリプトを入れた。`python -m site --user-base` で出たパスの下の `Scripts` フォルダ(例: `%APPDATA%\Python\Python312\Scripts`)をユーザー環境変数 `PATH` に追加してください。
+- インストール直後で、開いたままのターミナルに PATH の変更が反映されていない。新しい PowerShell ウィンドウを開き直してください。
+- PATH を直したくない・一時的に試すだけなら、`python -m moviekaleidoscope.cli`(`mkaleido` の代わり)/ `python -m moviekaleidoscope.gui`(`mkaleido-gui` の代わり)でも起動できます。
+
 ## ファイルの構成
 
 ```
@@ -241,6 +248,7 @@ mkaleido --from-plan out.mp4.plan.json -o again.mp4       # 同じ構成で作�
 | 症状 | 対処 |
 |---|---|
 | `ffmpeg が見つかりません` | インストール後にターミナルを開き直す。または `--ffmpeg` で指定 |
+| `mkaleido` / `mkaleido-gui` が見つかりません | [インストール](#インストール)の PATH の節を参照。`python -m moviekaleidoscope.cli` / `python -m moviekaleidoscope.gui` でも代用できます |
 | `有効な入力動画がありません` | 入力が壊れているか、0.5 秒未満です。警告にスキップの理由が出ています |
 | 途中で止まった・失敗した | `-v` で詳細を表示。`--keep-temp` で作業フォルダを残して確認できます。失敗したクリップは、別の入力で 1 回だけやり直します |
 | 音楽とカットが合わない | ログの BPM を確認。違うときは `--bpm` で指定 |
