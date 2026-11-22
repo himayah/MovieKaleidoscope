@@ -289,15 +289,30 @@ ffmpeg(エンコード: libx264 → seg_00001.mp4)
 | 項目 | 既定 |
 |---|---|
 | コンテナ | mp4 |
-| 映像 | H.264 (libx264)、`crf: 18`、`preset: medium`、`yuv420p` |
+| 映像 | H.264。`video.backend: auto`(既定)が起動時に GPU の NVENC を使えるか確認し、使えれば `h264_nvenc`、使えなければ `libx264` を使う(§8.3.1)。`crf: 18`(nvenc では `-cq` に、同じ 0–51 スケールで渡る)、`preset: medium`(software のみ。nvenc 側のプリセットは固定で `p5`)、`yuv420p` |
 | 音声 | AAC 192kbps(音声ありの場合) |
+
+#### 8.3.1 GPU エンコード(NVENC)(GPU redesign §A、2026-11-22)
+
+- `video.backend`: `auto`(既定) / `software` / `nvenc`。`auto` は ffmpeg の `-encoders` 一覧に `h264_nvenc` があるか見たあと、256×256 の短いダミー映像を実際に nvenc でエンコードしてみて判定する(ffmpeg のパスごとに結果をキャッシュし、プロセス内で 1 回だけ実機確認する)。
+- 並列数の既定(`jobs: auto`)は、nvenc かつ plan が Python フレームバックエンド(§7、エフェクトの `backend_for` が `"frame"` を返すもの)を使わないときだけ**論理コア数の 3/4**。それ以外(software、またはフレームバックエンド併用時)は**論理コア数の半分**のまま(`pipeline.default_jobs()`)。nvenc は libx264 ほど CPU コアを使わないため、より多くのジョブを同時に走らせられる想定だが、フレームバックエンドの per-frame 処理は GIL を握るため、その場合は増やしても速くならない(review finding, 2026-11-21)。
+- GPU のドライバは同時に開ける NVENC セッション数に上限があり、機種・ドライバ依存で事前に知る方法がない。実測(2026-11-22、24 論理コア・コンシューマ GPU 1 枚): 上記の既定(18 ジョブ)では `h264_nvenc` が `Could not open encoder before EOF` を返し、**レンダリング全体が失敗**した。10 ジョブでは成功、14 ジョブでは失敗(この機種の上限は 10〜13 ジョブの間)。
+- そのため、NVENC のエンコーダを開けなかった場合(エラー文言に `nvenc` と `Could not open encoder` / `Generic error in an external library` のいずれかを含む)は、そのクリップをその場で再試行しつつ、同時に NVENC セッションを開けるクリップ数の上限を 1 ずつ下げる(`pipeline._NvencGate`。この render 1 回の間だけ有効で、プロセス間・呼び出し間で共有しない)。上限が 1 まで下がってもなお失敗する場合は、GPU・ドライバ側の別の問題とみなしてエラーを返す。
+- software 入力の読み出し用に別で予約していたエンコーダ固有の `-threads` は、nvenc では意味を持たないため渡さない。
 
 ### 8.4 作業ディレクトリ
 
 - 既定は OS の一時ディレクトリ配下に専用フォルダを作る。`--work-dir` で変更できる。
+- Windows では、既定の一時ディレクトリのドライブの空き容量が 20GB 未満のとき、ローカルの固定ドライブのうち空き容量が最大のものに切り替える(GPU redesign §D、2026-11-22)。セグメントファイル一式がまとまった容量を使うための安全策で、速度目的の最適化ではない。ドライブの判定はプロセス単位でキャッシュする(ドライブ構成は実行中に変わらない前提)。POSIX ではドライブレター概念がないため常に通常の OS 一時ディレクトリを使う。
 - 正常終了時、失敗時、Ctrl+C 時のいずれでも削除する。`--keep-temp` で残せる。
 - Ctrl+C では、起動中の ffmpeg 子プロセスを終了させてから後始末する(終了コード 130)。
 - 削除に失敗したら警告を出す(以前は黙って無視していたため、キャンセル後も生き残った ffmpeg がセグメントを開いたままにしていることに気づけなかった。§11)。
+
+### 8.5 電源プラン(Windows)
+
+- レンダリング中だけ Windows の電源プランを「高パフォーマンス」に切り替え、終了時(正常終了・失敗・中断を含む)に元のプランへ戻す(`util/power.py`)。CPU/GPU 負荷の高い処理が既定の「バランス」プランでクロックを抑えられるのを避けるための最適化。
+- `powercfg` が使えない、非 Windows、プランの取得・切り替えに失敗した場合は警告を出すだけでレンダリングは続行する(ベストエフォートで、失敗させない)。
+- `runtime.power_plan: false` で無効化できる(既定は `true`)。
 
 ## 9. 設定ファイル
 
@@ -325,6 +340,7 @@ video:
   fps: null
   crf: 18
   preset: medium
+  backend: auto       # auto / software / nvenc(§8.3.1)
 
 audio:
   file: ./bgm.wav     # null なら音声なし
@@ -353,6 +369,7 @@ runtime:
   keep_temp: false
   ffmpeg: null        # null なら 環境変数 FFMPEG_BIN → PATH の順に探す
   ffprobe: null
+  power_plan: true    # レンダリング中だけ Windows を「高パフォーマンス」に切り替える(§8.5)
 ```
 
 ## 10. CLI
@@ -441,9 +458,9 @@ MovieKaleidoscope/
 │  ├─ audio/bpm.py        # BpmDetector, 手動指定
 │  ├─ planner/            # planner.py, plan.py(スキーマ), rng.py, motion.py
 │  ├─ effects/            # base.py, registry.py, 各エフェクト
-│  ├─ render/             # ffmpeg.py, segment.py, concat.py
+│  ├─ render/             # ffmpeg.py(コマンド組み立て), pipeline.py(並列実行・連結・GPU/作業ディレクトリ), frame_segment.py(frame バックエンド)
 │  ├─ gui/                # model.py(設定モデル), runner.py(バックグラウンド実行), app.py(画面)
-│  └─ util/               # progress.py, process.py
+│  └─ util/               # progress.py, process.py, memory.py(空きメモリ見積り), power.py(電源プラン切り替え)
 └─ tests/
    ├─ conftest.py         # ダミー素材のフィクスチャ
    ├─ tools/make_dummy.py # ダミー動画・音声の生成
@@ -499,11 +516,11 @@ MovieKaleidoscope/
 | ffmpeg のバージョン差 | 起動時にバージョンを確認し、使用フィルタが無ければ分かりやすいエラーにする |
 | Windows のパス・文字コード問題 | §11 の規約とテストで担保する |
 
-性能目標: 720p / 30fps / 60 秒の出力を、frame 系エフェクトを含む既定設定で、一般的な PC(`jobs=auto`)で 5 分以内に生成する。WSL2 では余裕で満たしている(下記)。Windows ネイティブでの実測は未了。
+性能目標: 720p / 30fps / 60 秒の出力を、frame 系エフェクトを含む既定設定で、一般的な PC(`jobs=auto`)で 5 分以内に生成する。WSL2・Windows ネイティブとも余裕で満たしている(README の「性能の目安」、下記)。
 
-参考(M5 時点、全 15 エフェクト既定、WSL2 / 24 論理コア、`preset: medium`・`crf: 18`、60 秒・22 クリップ): 1280×720 は `jobs=1` で 29.7 秒(ピークメモリ約 1GB。`reverse` のバッファを含む)、`jobs=4` で 11 秒、`jobs=12` で 9.7 秒。1920×1080 は `jobs=12` で 18 秒(ピークメモリ約 1.4GB)。frame 系 processor の 1 フレームあたりの時間は 720p で、`kaleidoscope` 14ms、`tile` 8ms、`mirror` 2ms、その他 1.5ms 以下。1080p では約 2 倍。
+参考(M5 時点、全 15 エフェクト既定、WSL2 / 24 論理コア、`preset: medium`・`crf: 18`、60 秒・22 クリップ): 1280×720 は `jobs=1` で 29.7 秒(ピークメモリ約 1GB。`reverse` のバッファを含む)、`jobs=4` で 11 秒、`jobs=12` で 9.7 秒。1920×1080 は `jobs=12` で 18 秒(ピークメモリ約 1.4GB)。frame 系 processor の 1 フレームあたりの時間は 720p で、`kaleidoscope` 14ms、`tile` 8ms、`mirror` 2ms、その他 1.5ms 以下。1080p では約 2 倍。Windows ネイティブでも同条件でほぼ同じ数値(README)。
 
-参考(M1 時点、エフェクトなし、WSL2 / 24 論理コア、`preset: ultrafast`、1 クリップ 0.2 秒): 60 秒・300 クリップの生成に 3.9 秒。ffmpeg の起動回数は、この規模では問題にならなかった。Windows ネイティブでの数値は未測定。
+参考(M1 時点、エフェクトなし、WSL2 / 24 論理コア、`preset: ultrafast`、1 クリップ 0.2 秒): 60 秒・300 クリップの生成に 3.9 秒。ffmpeg の起動回数は、この規模では問題にならなかった。Windows ネイティブでの同条件の数値は未測定(近い条件として、C5 の 5 分・431 クリップの実測が TESTING.md にある)。
 
 ## 15. 実装の進め方(マイルストーン案)
 
@@ -584,5 +601,5 @@ MovieKaleidoscope/
 
 - model と runner は画面なしで、実ファイルを使って検査する(進捗・ログの取り込み、失敗、中止、同時実行の拒否、ロギングの後始末、フィールドごとのエラーメッセージ、設定の往復、記憶と復元)。
 - ウィンドウは、表示環境のもとで、プログラムから操作して検査する(フォームの往復、無効化、ボタン、ダイアログ、生成・失敗・中止・plan のみ・plan から再生成・設定の保存と読み込み・終了時の確認、進捗バーが前へしか進まないこと)。表示がない環境ではスキップし、Linux の CI は仮想ディスプレイ(xvfb)で実行する。
-- 仮想ディスプレイのスクリーンショットで、各タブ・実行中・完了後の見た目を確認した(Windows ネイティブでは未確認)。
+- 仮想ディスプレイのスクリーンショットで、各タブ・実行中・完了後の見た目を確認した。Windows ネイティブでの見た目と操作(表示倍率 125%/150%、日本語フォント、ダイアログ、コンソールが出ないこと、実行中のロックと中止)は、利用者が実機で確認して OK(2026-11-16。TESTING.md の C1)。
 - **環境の注意**: Tk の `after` タイマーは壁時計に従う。WSL2 では壁時計が数十秒単位で後ろへ跳ぶことがあり、そのときは取り込みが跳んだ分だけ遅れる(ジョブ自体は止まらない)。テストは `poll_now()` で取り込み、タイマーに依存しない。

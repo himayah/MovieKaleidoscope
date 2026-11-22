@@ -18,7 +18,8 @@ video:
   height: null
   fps: null           # 例: 30 / 29.97 / "30000/1001"
   crf: 18
-  preset: medium
+  preset: medium      # software のときのみ有効。nvenc はプリセット固定
+  backend: auto       # auto(既定。GPU の NVENC が使えれば使う) / software / nvenc
 
 audio:
   file: null          # 例: ./bgm.wav (null なら音声なし)
@@ -45,3 +46,4 @@ runtime:
   keep_temp: false
   ffmpeg: null        # null なら 環境変数 FFMPEG_BIN → PATH の順に探す
   ffprobe: null
+  power_plan: true    # レンダリング中だけ Windows を「高パフォーマンス」に切り替える(Windows のみ。他は無視)

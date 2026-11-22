@@ -224,6 +224,78 @@ def count_frames(tools: Tools, path: Path) -> int | None:
     return int(text) if code == 0 and text.isdigit() else None
 
 
+# ---------------------------------------------------------------------------------------------
+# NVENC concurrent-session backoff (SPEC: GPU redesign §A). A GPU's driver caps how many NVENC
+# sessions may be open at once; the cap varies by GPU/driver and isn't discoverable up front, so
+# `default_jobs()`'s CPU-based guess can exceed it (observed: 24 logical cores -> 18 jobs, but
+# this GPU only accepts ~10-13 concurrent h264_nvenc sessions; above that every open fails and
+# the render is fatal). Rather than hard-code a number, back off at run time: on the first such
+# failure, lower how many clips may hold an open NVENC encoder at once and retry that clip.
+# ---------------------------------------------------------------------------------------------
+_NVENC_CAPACITY_HINTS = ("could not open encoder", "generic error in an external library")
+
+
+def _looks_like_nvenc_capacity_error(message: str) -> bool:
+    low = message.lower()
+    return "nvenc" in low and any(hint in low for hint in _NVENC_CAPACITY_HINTS)
+
+
+class _NvencGate:
+    """Admits at most `cap` concurrent holders; `shrink()` lowers `cap` (floor 1)."""
+
+    def __init__(self, cap: int) -> None:
+        self._cond = threading.Condition()
+        self._cap = max(1, cap)
+        self._active = 0
+
+    @property
+    def cap(self) -> int:
+        with self._cond:
+            return self._cap
+
+    def acquire(self) -> None:
+        with self._cond:
+            while self._active >= self._cap:
+                self._cond.wait()
+            self._active += 1
+
+    def release(self) -> None:
+        with self._cond:
+            self._active -= 1
+            self._cond.notify_all()
+
+    def shrink(self) -> int | None:
+        """Lower the cap by one; None if already at the floor (nothing left to try)."""
+        with self._cond:
+            if self._cap <= 1:
+                return None
+            self._cap -= 1
+            self._cond.notify_all()
+            return self._cap
+
+
+def _render_with_nvenc_backoff(gate: "_NvencGate | None", segment_renderer: Callable[..., None],
+                               tools: Tools, clip: ClipSpec, plan: Plan, enc: EncodeSettings,
+                               dest: Path, threads: int, token: "_AnyEvent | None") -> None:
+    if gate is None:
+        segment_renderer(tools, clip, plan, enc, dest, threads, token)
+        return
+    while True:
+        gate.acquire()
+        try:
+            segment_renderer(tools, clip, plan, enc, dest, threads, token)
+            return
+        except RenderError as e:
+            if not _looks_like_nvenc_capacity_error(str(e)):
+                raise
+            new_cap = gate.shrink()
+            if new_cap is None:
+                raise
+            log.warning("NVENC の同時エンコード数が上限を超えたため、同時実行数を %d に減らして再試行します", new_cap)
+        finally:
+            gate.release()
+
+
 def render_segment(tools: Tools, clip: ClipSpec, plan: Plan, enc: EncodeSettings,
                    dest: Path, threads: int, cancel: _AnyEvent | None) -> None:
     """Render one clip to `dest`; raises RenderError unless exactly clip.frames frames result."""
@@ -297,6 +369,7 @@ def render_plan(
     token = _AnyEvent(cancel, stop)
     replaced: list[int] = []
     lock = threading.Lock()
+    nvenc_gate = _NvencGate(jobs) if backend == "nvenc" else None
 
     work = _make_work_dir(runtime)
     log.debug("作業フォルダ: %s", work)
@@ -306,7 +379,8 @@ def render_plan(
         def task(clip: ClipSpec) -> None:
             dest = seg_paths[clip.index]
             try:
-                segment_renderer(tools, clip, plan, enc, dest, threads, token)
+                _render_with_nvenc_backoff(nvenc_gate, segment_renderer, tools, clip, plan, enc,
+                                           dest, threads, token)
             except RenderError as e:
                 if inputs is None or token.is_set():
                     raise
@@ -317,7 +391,8 @@ def render_plan(
                 clip.source = new
                 with lock:
                     replaced.append(clip.index)
-                segment_renderer(tools, clip, plan, enc, dest, threads, token)
+                _render_with_nvenc_backoff(nvenc_gate, segment_renderer, tools, clip, plan, enc,
+                                           dest, threads, token)
 
         total = plan.output.frames      # progress in frames: clips differ a lot in length
         progress("セグメント生成", 0, total)
