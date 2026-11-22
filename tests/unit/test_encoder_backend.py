@@ -3,6 +3,8 @@ backoff (GPU redesign SPEC §A)."""
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from moviekaleidoscope.errors import RenderError
@@ -40,34 +42,101 @@ def test_auto_falls_back_when_encoder_is_not_listed(monkeypatch):
     assert pipeline.resolve_encoder_backend(make_tools(), "auto") == "software"
 
 
-def test_auto_falls_back_when_the_probe_encode_fails(monkeypatch):
-    calls = iter([(0, "h264_nvenc ...\n", ""), (1, "", "no CUDA device")])
-    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: next(calls))
+def test_auto_falls_back_when_listing_encoders_raises(monkeypatch):
+    """A hung/missing ffmpeg must fall back, not propagate (never abort the render)."""
+    def raises(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=10)
+    monkeypatch.setattr(pipeline, "run_capture", raises)
     assert pipeline.resolve_encoder_backend(make_tools(), "auto") == "software"
 
 
-def test_auto_resolves_to_nvenc_when_listed_and_the_probe_succeeds(monkeypatch):
-    calls = iter([(0, "h264_nvenc ...\n", ""), (0, "", "")])
-    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: next(calls))
+def test_auto_falls_back_when_the_nvenc_timing_fails(monkeypatch):
+    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: (0, "h264_nvenc ...\n", ""))
+    monkeypatch.setattr(pipeline, "_time_encode", lambda tools, codec: None if codec == "h264_nvenc" else 1.0)
+    assert pipeline.resolve_encoder_backend(make_tools(), "auto") == "software"
+
+
+def test_auto_resolves_to_nvenc_when_it_is_faster(monkeypatch):
+    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: (0, "h264_nvenc ...\n", ""))
+    times = {"h264_nvenc": 0.2, "libx264": 0.5}
+    monkeypatch.setattr(pipeline, "_time_encode", lambda tools, codec: times[codec])
     assert pipeline.resolve_encoder_backend(make_tools(), "auto") == "nvenc"
 
 
+def test_auto_resolves_to_software_when_nvenc_is_dramatically_slower(monkeypatch):
+    """A truly broken/crippled GPU (not just "a bit slower") must not regress vs. software-only."""
+    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: (0, "h264_nvenc ...\n", ""))
+    times = {"h264_nvenc": 2.0, "libx264": 0.3}   # ~6.7x slower, well past the tolerance
+    monkeypatch.setattr(pipeline, "_time_encode", lambda tools, codec: times[codec])
+    assert pipeline.resolve_encoder_backend(make_tools(), "auto") == "software"
+
+
+def test_auto_still_prefers_nvenc_when_only_moderately_slower_in_this_lone_probe(monkeypatch):
+    """Mirrors what was actually measured on real hardware (2026-11-22): nvenc's real advantage
+    (relieving CPU contention under many concurrent jobs) is invisible to a single-stream probe,
+    which measured nvenc as ~1.7x slower there even though a real multi-clip render was ~15%
+    faster with nvenc. A moderate single-stream slowdown is therefore tolerated, not penalised."""
+    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: (0, "h264_nvenc ...\n", ""))
+    times = {"h264_nvenc": 0.27, "libx264": 0.16}
+    monkeypatch.setattr(pipeline, "_time_encode", lambda tools, codec: times[codec])
+    assert pipeline.resolve_encoder_backend(make_tools(), "auto") == "nvenc"
+
+
+def test_auto_resolves_to_nvenc_right_at_the_slowdown_threshold(monkeypatch):
+    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: (0, "h264_nvenc ...\n", ""))
+    times = {"h264_nvenc": 1.0, "libx264": 0.5}   # exactly _NVENC_MAX_SLOWDOWN (2x) -> still nvenc
+    monkeypatch.setattr(pipeline, "_time_encode", lambda tools, codec: times[codec])
+    assert pipeline.resolve_encoder_backend(make_tools(), "auto") == "nvenc"
+
+
+def test_auto_resolves_to_software_just_past_the_slowdown_threshold(monkeypatch):
+    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: (0, "h264_nvenc ...\n", ""))
+    times = {"h264_nvenc": 1.01, "libx264": 0.5}  # just over 2x -> software
+    monkeypatch.setattr(pipeline, "_time_encode", lambda tools, codec: times[codec])
+    assert pipeline.resolve_encoder_backend(make_tools(), "auto") == "software"
+
+
+def test_auto_resolves_to_nvenc_when_the_software_timing_itself_fails(monkeypatch):
+    """nvenc did demonstrably work; a failed comparison is not a reason to distrust it."""
+    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: (0, "h264_nvenc ...\n", ""))
+    monkeypatch.setattr(pipeline, "_time_encode", lambda tools, codec: 1.0 if codec == "h264_nvenc" else None)
+    assert pipeline.resolve_encoder_backend(make_tools(), "auto") == "nvenc"
+
+
+def test_time_encode_returns_none_when_run_capture_raises(monkeypatch):
+    def raises(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=10)
+    monkeypatch.setattr(pipeline, "run_capture", raises)
+    assert pipeline._time_encode(make_tools(), "h264_nvenc") is None
+
+
+def test_time_encode_returns_none_on_nonzero_exit(monkeypatch):
+    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: (1, "", "error"))
+    assert pipeline._time_encode(make_tools(), "h264_nvenc") is None
+
+
+def test_time_encode_returns_elapsed_seconds_on_success(monkeypatch):
+    monkeypatch.setattr(pipeline, "run_capture", lambda *a, **k: (0, "", ""))
+    elapsed = pipeline._time_encode(make_tools(), "h264_nvenc")
+    assert elapsed is not None and elapsed >= 0
+
+
 def test_resolution_is_cached_per_ffmpeg_path(monkeypatch):
-    calls = []
-
-    def fake(*a, **k):
-        calls.append(a)
-        # odd calls = the "-encoders" check, even calls = the test-encode probe
-        return (0, "h264_nvenc\n", "") if len(calls) % 2 == 1 else (0, "", "")
-
-    monkeypatch.setattr(pipeline, "run_capture", fake)
+    list_calls = []
+    time_calls = []
+    monkeypatch.setattr(pipeline, "run_capture",
+                        lambda *a, **k: list_calls.append(a) or (0, "h264_nvenc\n", ""))
+    monkeypatch.setattr(pipeline, "_time_encode",
+                        lambda tools, codec: time_calls.append(codec) or {"h264_nvenc": 0.2, "libx264": 0.5}[codec])
     t = make_tools()
     assert pipeline.resolve_encoder_backend(t, "auto") == "nvenc"
     assert pipeline.resolve_encoder_backend(t, "auto") == "nvenc"
-    assert len(calls) == 2     # probed once (two run_capture calls inside it), not twice
+    assert len(list_calls) == 1     # "-encoders" listed once
+    assert len(time_calls) == 2     # nvenc + software timed once, not twice
 
     assert pipeline.resolve_encoder_backend(make_tools("other-ffmpeg"), "auto") == "nvenc"
-    assert len(calls) == 4     # a different ffmpeg path is probed again
+    assert len(list_calls) == 2     # a different ffmpeg path is probed again
+    assert len(time_calls) == 4
 
 
 def test_encoder_args_nvenc_uses_hyphenated_aq_options():

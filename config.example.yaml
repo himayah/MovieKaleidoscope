@@ -19,7 +19,7 @@ video:
   fps: null           # 例: 30 / 29.97 / "30000/1001"
   crf: 18
   preset: medium      # software のときのみ有効。nvenc はプリセット固定
-  backend: auto       # auto(既定。GPU の NVENC が使えれば使う) / software / nvenc
+  backend: auto       # auto(既定。GPU の NVENC が使えて、極端に遅くなければ使う) / software / nvenc
 
 audio:
   file: null          # 例: ./bgm.wav (null なら音声なし)

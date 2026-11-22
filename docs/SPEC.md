@@ -289,12 +289,14 @@ ffmpeg(エンコード: libx264 → seg_00001.mp4)
 | 項目 | 既定 |
 |---|---|
 | コンテナ | mp4 |
-| 映像 | H.264。`video.backend: auto`(既定)が起動時に GPU の NVENC を使えるか確認し、使えれば `h264_nvenc`、使えなければ `libx264` を使う(§8.3.1)。`crf: 18`(nvenc では `-cq` に、同じ 0–51 スケールで渡る)、`preset: medium`(software のみ。nvenc 側のプリセットは固定で `p5`)、`yuv420p` |
+| 映像 | H.264。`video.backend: auto`(既定)が起動時に GPU の NVENC を使うべきか判定し、使えば `h264_nvenc`、そうでなければ `libx264` を使う(§8.3.1)。`crf: 18`(nvenc では `-cq` に、同じ 0–51 スケールで渡る)、`preset: medium`(software のみ。nvenc 側のプリセットは固定で `p5`)、`yuv420p` |
 | 音声 | AAC 192kbps(音声ありの場合) |
 
 #### 8.3.1 GPU エンコード(NVENC)(GPU redesign §A、2026-11-22)
 
-- `video.backend`: `auto`(既定) / `software` / `nvenc`。`auto` は ffmpeg の `-encoders` 一覧に `h264_nvenc` があるか見たあと、256×256 の短いダミー映像を実際に nvenc でエンコードしてみて判定する(ffmpeg のパスごとに結果をキャッシュし、プロセス内で 1 回だけ実機確認する)。
+- `video.backend`: `auto`(既定) / `software` / `nvenc`。`auto` はまず ffmpeg の `-encoders` 一覧に `h264_nvenc` があるか確認し、なければ即座に `software`。あれば、720p・30フレーム(1秒分)の同じ合成映像を nvenc と software の両方で実際にエンコードして所要時間を比べ、**nvenc が software の `_NVENC_MAX_SLOWDOWN`(既定 2)倍より遅くない限り nvenc を選ぶ**(ffmpeg のパスごとに結果をキャッシュし、プロセス内で 1 回だけ実機確認する)。
+- この比較は実機で検証した結果、単純に「速い方を選ぶ」のではなく**非対称な許容**にしている。nvenc の実際の利点は、多数のクリップを並列実行する際に CPU をデコード・エフェクト処理へ回せること(下記)であり、1 本だけの短いエンコードを比べる起動時のプローブではこの効果が見えない。実測(2026-11-22、24 論理コア・コンシューマ GPU 1 枚): 60 秒・22 クリップの本番相当のレンダリングでは `jobs=12` で nvenc が software より約 15% 速かった(9.0 秒 対 10.6 秒)にもかかわらず、この単発比較では常に nvenc が software の 1.2〜1.6 倍遅いという結果になった(nvenc 側の固定的なセッション初期化コストが、1〜5 秒の短いクリップでは償却されないため)。そのため「単純に速い方を選ぶ」(許容倍率 1 倍)にすると、この実機でも常に software が選ばれてしまい、実際には有利な GPU の speedup を取り逃がす。許容倍率 2 倍であれば、この実機では正しく nvenc が選ばれる。許容を緩めすぎると、本当に遅い/壊れた GPU を見逃すリスクとのトレードオフになる。
+- 判定の各段階(一覧の取得、nvenc の試しエンコード、software の試しエンコード)は、どれも失敗(タイムアウト・起動不能・ハングなど)しても例外を外に漏らさず `software` にフォールバックする。GPU・ドライバの組み合わせを確認していない環境でも、この判定だけでレンダリングが止まることはない。
 - 並列数の既定(`jobs: auto`)は、nvenc かつ plan が Python フレームバックエンド(§7、エフェクトの `backend_for` が `"frame"` を返すもの)を使わないときだけ**論理コア数の 3/4**。それ以外(software、またはフレームバックエンド併用時)は**論理コア数の半分**のまま(`pipeline.default_jobs()`)。nvenc は libx264 ほど CPU コアを使わないため、より多くのジョブを同時に走らせられる想定だが、フレームバックエンドの per-frame 処理は GIL を握るため、その場合は増やしても速くならない(review finding, 2026-11-21)。
 - GPU のドライバは同時に開ける NVENC セッション数に上限があり、機種・ドライバ依存で事前に知る方法がない。実測(2026-11-22、24 論理コア・コンシューマ GPU 1 枚): 上記の既定(18 ジョブ)では `h264_nvenc` が `Could not open encoder before EOF` を返し、**レンダリング全体が失敗**した。10 ジョブでは成功、14 ジョブでは失敗(この機種の上限は 10〜13 ジョブの間)。
 - そのため、NVENC のエンコーダを開けなかった場合(エラー文言に `nvenc` と `Could not open encoder` / `Generic error in an external library` のいずれかを含む)は、そのクリップをその場で再試行しつつ、同時に NVENC セッションを開けるクリップ数の上限を 1 ずつ下げる(`pipeline._NvencGate`。この render 1 回の間だけ有効で、プロセス間・呼び出し間で共有しない)。上限が 1 まで下がってもなお失敗する場合は、GPU・ドライバ側の別の問題とみなしてエラーを返す。
@@ -441,6 +443,7 @@ mkaleido [-c CONFIG] [-i INPUT ...] [-o OUTPUT] [options]
   - **Windows では、ffmpeg を別のプロセスグループで起動する**(`CREATE_NEW_PROCESS_GROUP`)。コンソールの Ctrl+C は同じコンソールの全プロセスに届くため、ffmpeg が先に異常終了し、メインスレッドが KeyboardInterrupt を受け取る前に、ワーカーがそれを「クリップの失敗」と見なして警告を出し、別の入力で再試行していた(終了コードは 130 だったが、誤解を招く警告と、再試行の ffmpeg が残った)。別のグループにすると Ctrl+C を受けるのは Python だけになり、子プロセスはこちらで止める。パイプ越しに ffmpeg を動かしているときは、**先に自分側のパイプを閉じてから**終了させる(書き込みでブロックしているデコーダは、SIGTERM に応じない。順序を逆にすると、キャンセルや失敗の後始末に 5〜10 秒かかった)。
   - 標準出力・標準エラーは、起動時に `errors="replace"` にする。日本語 Windows でリダイレクトした出力は cp932 になり、符号化できない文字で `print` やログが失敗するため(ファイル名や ffmpeg のメッセージなど、動的な文字列にも備える)。
   - ソース中のメッセージは、cp932 で符号化できる文字に限る(`—`(U+2014)などは使わない)。テストが検査している。
+  - ffmpeg/ffprobe を起動する確認処理(バージョン確認、NVENC の判定・比較。§8.3.1)は、タイムアウトしても `subprocess.TimeoutExpired` を投げたまま終わらせず、必ず `MkError` 系の例外(`ToolNotFoundError`)か、安全な既定値(`software`)に変換する。`except (OSError, TimeoutError)` は組み込みの `TimeoutError` を指すため `subprocess.TimeoutExpired` を**捕まえない**(両者は無関係のクラス)。2026-11-22 にこの誤りで `locate_tools()` と GPU の判定が、普段と違う ffmpeg の挙動(ハング・応答なし)に遭遇すると未処理の例外で落ちるバグが見つかり、`except (OSError, subprocess.TimeoutExpired)` に修正した(`media/tools.py`、`render/pipeline.py`)。
 - 開発は現在の WSL2 上でも行える(ffmpeg 4.4.2、Python 3.10 が導入済み)。ただし `/mnt/c` 配下の動画は I/O が遅いので、パフォーマンスの評価は Windows ネイティブで行う。
 
 ## 12. プロジェクト構成(案)

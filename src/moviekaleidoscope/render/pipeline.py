@@ -7,8 +7,10 @@ import dataclasses
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
+import time
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from fractions import Fraction
 from pathlib import Path
@@ -114,22 +116,71 @@ def resolve_encoder_backend(tools: Tools, requested: str) -> str:
     return cached
 
 
+# A representative encode (1 second of 720p): long enough that process-launch overhead doesn't
+# dominate the comparison, short enough that the probe stays sub-second on any GPU/CPU worth
+# using at all. Both backends encode the exact same synthetic clip so the comparison is fair.
+_PROBE_FRAMES = 30
+_PROBE_SIZE = "1280x720"
+
+# nvenc's real advantage in an actual render is relieving CPU contention under many concurrent
+# jobs (it frees cores for decode/effects) -- a one-off, single-stream timing probe structurally
+# cannot see that (measured on a 24-core/NVIDIA machine, 2026-11-22: a real 60s/22-clip render was
+# ~15% faster with nvenc at jobs=12, yet this single-stream probe measured nvenc as 20-60% slower
+# at every clip length from 1-5s, because of nvenc's fixed per-process session-init cost, which a
+# lone short probe can't amortise the way a real multi-clip, multi-job render does). So this probe
+# is only a safety net against a GPU/driver combination that is dramatically bad, not a fine
+# comparison: nvenc is preferred up to being this many times slower than software before giving up
+# on it, trading away some protection against marginally-slower GPUs to keep the (likely common)
+# case of a GPU that is genuinely faster under real concurrent load, but not in this lone probe.
+_NVENC_MAX_SLOWDOWN = 2.0
+
+
 def _probe_nvenc(tools: Tools) -> str:
-    code, out, _ = run_capture([tools.ffmpeg, "-hide_banner", "-encoders"], timeout=10)
+    """Resolve "auto": "software" unless nvenc is available and not dramatically slower here.
+
+    Every step is best-effort -- a missing encoder, GPU/driver trouble, a hung subprocess, or any
+    other failure here falls back to "software" rather than raising, so a render is never aborted
+    by this probe on hardware we haven't seen (SPEC: GPU redesign §A)."""
+    try:
+        code, out, _ = run_capture([tools.ffmpeg, "-hide_banner", "-encoders"], timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return "software"
     if code != 0 or "h264_nvenc" not in out:
         return "software"
-    try:
-        code, _, _ = run_capture(
-            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-             "-i", "color=c=black:s=256x256:d=0.2", "-frames:v", "4",
-             "-c:v", "h264_nvenc", "-preset", NVENC_PRESET, "-f", "null", "-"],
-            timeout=10)
-    except (OSError, TimeoutError):
-        code = 1
-    if code != 0:
+
+    nvenc_time = _time_encode(tools, "h264_nvenc")
+    if nvenc_time is None:
         log.warning("NVENC を初期化できないため software エンコードを使います")
         return "software"
-    return "nvenc"
+
+    software_time = _time_encode(tools, "libx264")
+    if software_time is None:
+        # Could not time software for comparison, but nvenc did just work -- use it.
+        return "nvenc"
+    if nvenc_time <= software_time * _NVENC_MAX_SLOWDOWN:
+        return "nvenc"
+    log.info("NVENC がこのPCでは極端に遅いため software エンコードを使います"
+             "(nvenc: %.2f秒 / software: %.2f秒、%d フレーム・%s で比較)",
+             nvenc_time, software_time, _PROBE_FRAMES, _PROBE_SIZE)
+    return "software"
+
+
+def _time_encode(tools: Tools, codec: str) -> float | None:
+    """Wall time (seconds) to encode `_PROBE_FRAMES` synthetic frames with `codec`; None on any
+    failure (missing codec, GPU/driver trouble, a hung subprocess -- never raises)."""
+    args = [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+            "-i", f"testsrc2=size={_PROBE_SIZE}:rate=30", "-frames:v", str(_PROBE_FRAMES)]
+    if codec == "h264_nvenc":
+        args += ["-c:v", "h264_nvenc", "-preset", NVENC_PRESET]
+    else:
+        args += ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
+    args += ["-f", "null", "-"]
+    start = time.monotonic()
+    try:
+        code, _, _ = run_capture(args, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return time.monotonic() - start if code == 0 else None
 
 
 # ---------------------------------------------------------------------------------------------

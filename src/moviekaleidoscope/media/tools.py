@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,7 +79,7 @@ def locate_tools(ffmpeg: str | None = None, ffprobe: str | None = None) -> Tools
 
     try:
         code, out, _ = run_capture([ff, "-hide_banner", "-version"], timeout=15)
-    except (OSError, TimeoutError) as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         raise ToolNotFoundError(f"ffmpeg を実行できません: {ff} ({e})") from None
     if code != 0:
         raise ToolNotFoundError(f"ffmpeg を実行できません: {ff}")
